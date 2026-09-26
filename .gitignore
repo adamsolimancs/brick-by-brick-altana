@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Python environments
+.venv/
+venv/
+env/
+.python-version
+
+# Packaging output
+build/
+dist/
+*.egg-info/
+
+# Databricks local state and generated artifacts
+.databricks/
+.bundle/
+
