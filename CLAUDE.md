@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Brick-by-Brick Address Resolution (Tech@NYU × Databricks × Altana): a pipeline that unifies multiple provider feeds of company addresses, identifies records referring to the same company, and selects a defensible canonical address with source provenance. The problem statement is `docs/Brick-by-Brick Use Case — Address Resolution [Student Copy].pdf`; the design plan is `docs/SETUP.md`.
+Brick-by-Brick Address Resolution (Tech@NYU × Databricks × Altana): a pipeline that unifies multiple provider feeds of company addresses, identifies records referring to the same company, and selects a defensible canonical address with source provenance. The problem statement is `docs/Brick-by-Brick Use Case — Address Resolution [Student Copy].pdf`; the initial design plan is in `docs/SETUP.md`.
+
+**The PDF is the source of truth** — it is the official project instructions. `docs/SETUP.md` is our own working plan; where it adds requirements the PDF doesn't state, treat them as proposals, not constraints, and defer to the PDF on any conflict.
 
 ## Current state vs. planned layout
 
@@ -26,7 +28,7 @@ Linting uses ruff (`ruff check .`, `ruff format .`); there is no ruff config yet
 Medallion pipeline in Unity Catalog, catalog `addressresolution`, schemas `bronze` / `silver` (/ `gold` planned), one table per provider (e.g. `addressresolution.bronze.provider_b_feed` → `addressresolution.silver.provider_b_feed`).
 
 - **Bronze**: raw provider values, never destructively cleaned; should carry provider id, source record id, ingestion timestamp, and batch/file id.
-- **Silver**: providers mapped to a common schema plus normalized comparison fields. Original values must be kept alongside normalized ones.
+- **Silver**: providers mapped to a common schema plus normalized comparison fields.
 - **Matching**: explicit stages — blocking (candidate generation; never all-pairs), interpretable pairwise evidence, scoring/classification, clustering into entities.
 - **Gold**: one record per resolved entity with contributing source ids, winning value per component, conflicting candidates, match/selection scores, rule/model version, and human-review status. Selection must be explainable — not just "latest wins".
 

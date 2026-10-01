@@ -65,7 +65,7 @@ Bronze tables preserve provider values without destructive cleaning. Each record
 
 ### Silver
 
-Silver tables map provider-specific fields into a common schema and add normalized fields for comparison. Original values must remain available alongside normalized values. Normalization can cover casing, whitespace, punctuation, common abbreviations, and country or administrative-region codes. Most of the work will be done in this layer since it poses the most challenges.
+Silver tables map provider-specific fields into a common schema and add normalized fields for comparison. Normalization can cover casing, whitespace, punctuation, common abbreviations, and country or administrative-region codes. Most of the work will be done in this layer since it poses the most challenges.
 
 ### Matching
 
@@ -121,10 +121,3 @@ Begin with deterministic matching rules and an explainable baseline. Use MLflow 
 ## Python files and notebooks
 
 Use regular Python modules for reusable ingestion, normalization, matching, resolution, and quality logic. These modules are easier to test, review, import, and execute in jobs. Use notebooks for EDA, visual evaluation, threshold tuning, and stakeholder demonstrations. Production notebooks should remain thin: they should import tested functions from `src/`, supply runtime parameters, and display results rather than contain the main implementation.
-
-## Questions / Things to consider
-- Should we start with an architecture around Spark to avoid rewriting code later?
-    - Scalability, distributed processing, batch/stream processing APIs, etc.
-- Can one company have multiple valid addresses, and must address roles such as registered, operational, and mailing be preserved?
-- How should shared addresses—such like office buildings be handled?
-    - maybe make an extra column for apt/suite
