@@ -10,18 +10,26 @@ Brick-by-Brick Address Resolution (Tech@NYU × Databricks × Altana): a pipeline
 
 ## Current state vs. planned layout
 
-The repo is early. There is no `pyproject.toml`, `databricks.yml`, test suite, or `src/` yet — only:
+The repo is early. There is no `pyproject.toml`, `databricks.yml`, or test suite yet. What exists:
 
 - `data/provider_a_feed.csv`, `data/provider_b_feed.csv` — raw sample feeds (~18.5k rows each).
+- `lib/clean_functions.py` — shared, provider-agnostic cleaning functions (see below).
 - `cleaning/clean_provider_b.py` — a Databricks notebook (bronze → silver for provider B).
 
-`docs/SETUP.md` defines the target structure (`src/{ingest,normalize,matching,resolution,quality}`, thin `notebooks/`, `resources/pipeline.yml`, `tests/{unit,integration}`, a Databricks bundle rooted at `databricks.yml`). When adding new code, move toward that layout: reusable logic belongs in importable, testable modules under `src/`; notebooks should only import from `src/`, pass parameters, and display results.
+`docs/SETUP.md` proposes a larger structure (`src/{ingest,normalize,matching,resolution,quality}`, `resources/pipeline.yml`, `tests/`, a bundle at `databricks.yml`). That is a proposal, not the current layout; shared code lives in `lib/` for now.
+
+## Shared code (`lib/`)
+
+Reusable logic goes in plain Python modules under `lib/` (not Databricks notebooks — no `# Databricks notebook source` header, or they can't be imported). Notebooks stay thin: they import from `lib/`, pick tables/columns, and display results.
+
+- `lib/clean_functions.py` — cleaning functions shared across all provider feeds. Functions take a `DataFrame` or `Column` and return one, with no hard-coded table or column names, so they work for any of the N providers. Before writing cleaning logic inside a provider notebook, check here; if it would apply to another provider, add it here instead.
+- The team Git folder is `/Workspace/Users/jl13852@nyu.edu/brick-by-brick-altana`. Notebooks append that path to `sys.path` before `from lib.clean_functions import ...`, so the import works from inside or outside the Git folder. Use `%load_ext autoreload` / `%autoreload 2` to pick up `lib/` edits without restarting Python.
 
 ## Running code
 
 Code is written for Databricks (PySpark), not local execution. `cleaning/*.py` files use the Databricks notebook source format (`# Databricks notebook source` header, cells separated by `# COMMAND ----------`) and rely on notebook globals `spark` and `display`. Keep that format when editing them.
 
-Linting uses ruff (`ruff check .`, `ruff format .`); there is no ruff config yet, so defaults apply.
+Linting uses ruff (`ruff check .`, `ruff format .`). `ruff.toml` declares the notebook globals (`spark`, `display`, `dbutils`) as builtins; otherwise defaults apply.
 
 ## Data architecture
 
@@ -47,4 +55,6 @@ The feeds disagree in schema and conventions, which is the core of the silver-la
 | country | full name (`United Kingdom`) | ISO-style code (`US`, `PL`) |
 | timestamp | `updated_at` | `created_at` |
 
-Both have `street_address`, which can contain embedded newlines, apt/suite fragments, mixed casing, and non-Latin scripts. The provider B cleaner renames to `company`, `city`, `region`; provider A's `state` has not yet been aligned to `region`. Whitespace trimming uses a regex rather than `F.trim` because `F.trim` misses tabs, newlines, and NBSPs.
+Both have `street_address`, which can contain embedded newlines, apt/suite fragments, mixed casing, and non-Latin scripts. The provider B cleaner renames to `company`, `city`, `region`; provider A's `state` has not yet been aligned to `region`. Whitespace trimming (`lib.clean_functions.trim_strings`) uses a regex rather than `F.trim` because `F.trim` misses tabs, newlines, NBSPs, and ideographic spaces.
+
+About 20% of `street_address` values in *both* feeds contain non-Latin script (CJK, Cyrillic, Hangul, Thai, Arabic, some Devanagari), roughly half of them mixed with Latin (e.g. `458 岡田 Street`). The non-Latin part is usually the street name, so don't strip or transliterate it destructively; build comparison fields that handle both feeds identically.
