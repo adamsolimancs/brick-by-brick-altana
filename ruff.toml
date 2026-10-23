@@ -1,0 +1,2 @@
+# Globals injected into Databricks notebooks.
+builtins = ["spark", "display", "dbutils"]
