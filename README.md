@@ -2,6 +2,8 @@
 
 A Tech@NYU, Databricks, and Altana project for building a scalable address-resolution pipeline that unifies provider feeds, identifies duplicate entities, and produces defensible canonical addresses with provenance.
 
+> **Note:** This is a test/scratch repo for experimenting with the project. It is **not** in sync with the live Databricks project (the team Git folder and Unity Catalog tables). Code here may lag behind, diverge from, or never reach the live workspace — treat the Databricks workspace as the authoritative version of the pipeline.
+
 ## Members
 
 - **Students:** Dharshan Vetrivelan, JJ Lee, Adam Soliman

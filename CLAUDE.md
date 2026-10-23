@@ -8,9 +8,46 @@ Brick-by-Brick Address Resolution (Tech@NYU × Databricks × Altana): a pipeline
 
 **The PDF is the source of truth** — it is the official project instructions. `docs/SETUP.md` is our own working plan; where it adds requirements the PDF doesn't state, treat them as proposals, not constraints, and defer to the PDF on any conflict.
 
+## Databricks is live; this repo is a local dev copy
+
+What's in the Databricks workspace (`addressresolution` Unity Catalog tables, pipelines, and workspace files) is the live project and the source of truth. This repo — and its GitHub remote — is only a local copy for personal development. Consequences:
+
+- Code here may lag behind or diverge from what runs in the workspace. Don't assume a file here matches its live counterpart, and don't describe this repo's contents as the state of the live pipeline. When in doubt, read the workspace with the CLI.
+- Changes made here only go live when pushed to the workspace with the Databricks CLI (see below). Committing or pushing to GitHub does not deploy anything.
+- The team Git folder `/Workspace/Users/jl13852@nyu.edu/brick-by-brick-altana` is outdated; don't treat it as the live code.
+- Table names, paths, and the data architecture below describe the live project's conventions, which code here is written against — not resources this repo owns.
+
+## Databricks CLI and agent skills
+
+Work on the live project is done from local agents (Claude Code, Codex) driving the Databricks CLI, not from Genie Code in the workspace. Agents edit files on local disk; the CLI moves code to/from the workspace, runs pipelines/jobs/SQL, and inspects workspace state.
+
+- **CLI**: installed via Homebrew (`brew install databricks/tap/databricks`, v1.22.1). Auth is OAuth through `databricks auth login --host https://dbc-031efa75-388b.cloud.databricks.com` (drop the `?o=...` suffix — zsh treats `?` as a glob). Check with `databricks auth profiles`.
+- **Agent skills**: the skills from [databricks-solutions/ai-dev-kit](https://github.com/databricks-solutions/ai-dev-kit) now ship as official Databricks AI Tools, installed globally with `databricks aitools install --agents claude-code,codex --scope global` (the kit's own bundled skills are deprecated). This adds the `databricks` plugin with skills such as `databricks-core` (CLI/auth, load first), `databricks-pipelines`, `databricks-jobs`, `databricks-dbsql`, and `databricks-unity-catalog`. Prefer these skills over ad hoc CLI usage. Re-run the install command to update.
+
+## Silver pipeline workflow (Databricks CLI)
+
+`silver_pipeline/` is a local copy of the Lakeflow pipeline **Silver Entity Resolution Pipeline** (id `f6e1e8a3-2396-4c3e-bbac-ac2c4a3b2c58`), whose source lives at `/Workspace/Users/aes10130@nyu.edu/Silver Entity Resolution Pipeline` (not a Git folder). The CLI is authenticated via the default profile (`aes10130@nyu.edu`). Edit locally, then push and run:
+
+```bash
+# Pull the latest workspace version (do this first if anyone edited in the web UI)
+databricks workspace export-dir "/Workspace/Users/aes10130@nyu.edu/Silver Entity Resolution Pipeline" silver_pipeline --overwrite
+
+# Push local edits (add --watch to keep uploading on save)
+databricks sync silver_pipeline "/Workspace/Users/aes10130@nyu.edu/Silver Entity Resolution Pipeline"
+
+# Run the pipeline and check status/errors
+databricks pipelines start-update f6e1e8a3-2396-4c3e-bbac-ac2c4a3b2c58
+databricks pipelines get f6e1e8a3-2396-4c3e-bbac-ac2c4a3b2c58
+databricks pipelines list-pipeline-events f6e1e8a3-2396-4c3e-bbac-ac2c4a3b2c58
+```
+
+A `SessionStart` hook (`.claude/settings.json`) runs `scripts/pull_workspace.sh` at the start of each local session, pulling the live workspace version into `silver_pipeline/`. Files edited locally since the last pull are skipped and reported instead of overwritten; the last-pulled copy is kept in `.databricks-pull/` (gitignored). Run the script manually to re-pull mid-session.
+
+`sync` makes the workspace match the local folder, so it can overwrite edits made in the Databricks web editor; re-export before syncing if the workspace may have changed. Other pipelines in the workspace (Bronze File Ingestion, Data Quality) belong to teammates — don't sync or start them.
+
 ## Current state vs. planned layout
 
-The repo is early. There is no `pyproject.toml`, `databricks.yml`, or test suite yet. What exists:
+This test repo is early. There is no `pyproject.toml`, `databricks.yml`, or test suite yet. What exists:
 
 - `data/provider_a_feed.csv`, `data/provider_b_feed.csv` — raw sample feeds (~18.5k rows each).
 - `lib/clean_functions.py` — shared, provider-agnostic cleaning functions (see below).
@@ -23,7 +60,7 @@ The repo is early. There is no `pyproject.toml`, `databricks.yml`, or test suite
 Reusable logic goes in plain Python modules under `lib/` (not Databricks notebooks — no `# Databricks notebook source` header, or they can't be imported). Notebooks stay thin: they import from `lib/`, pick tables/columns, and display results.
 
 - `lib/clean_functions.py` — cleaning functions shared across all provider feeds. Functions take a `DataFrame` or `Column` and return one, with no hard-coded table or column names, so they work for any of the N providers. Before writing cleaning logic inside a provider notebook, check here; if it would apply to another provider, add it here instead.
-- The team Git folder is `/Workspace/Users/jl13852@nyu.edu/brick-by-brick-altana`. Notebooks append that path to `sys.path` before `from lib.clean_functions import ...`, so the import works from inside or outside the Git folder. Use `%load_ext autoreload` / `%autoreload 2` to pick up `lib/` edits without restarting Python.
+- Notebooks append the workspace folder containing `lib/` to `sys.path` before `from lib.clean_functions import ...`. Use `%load_ext autoreload` / `%autoreload 2` to pick up `lib/` edits without restarting Python.
 
 ## Running code
 

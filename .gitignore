@@ -26,3 +26,7 @@ dist/
 .databricks/
 .bundle/
 
+.databricks-pull/
+
+# Provider feeds from the sponsor; keep local (repo is public)
+data/
