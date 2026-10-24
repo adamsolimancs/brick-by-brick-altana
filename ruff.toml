@@ -1,2 +1,5 @@
 # Globals injected into Databricks notebooks.
 builtins = ["spark", "display", "dbutils"]
+
+# Byte-identical copies of workspace files used by tests; not ours to reformat.
+extend-exclude = ["tests/fixtures"]

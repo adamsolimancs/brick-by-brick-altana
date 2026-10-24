@@ -152,6 +152,14 @@ def clean_provider_feed(
             df, "country", street_col="street_address", city_col="city"
         )
 
+    # Rebuild full_address from the final country. The helper builds it in
+    # step 3, before inference fills countries (3b) and Provider A's names
+    # become ISO codes (3c), so it would hold the pre-cleaning country.
+    df = df.withColumn(
+        "full_address",
+        F.concat_ws(", ", "street_address", "city", "state", "country"),
+    )
+
     # Step 3d: Flag abnormally short/long city and country values.
     # Short cities (< 2 chars) are likely data errors; long cities (> 50 chars)
     # catch AI hallucinations, misplaced addresses, or country names in the
