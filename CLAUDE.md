@@ -17,6 +17,10 @@ What's in the Databricks workspace (`addressresolution` Unity Catalog tables, pi
 - The team Git folder `/Workspace/Users/jl13852@nyu.edu/brick-by-brick-altana` is outdated; don't treat it as the live code.
 - Table names, paths, and the data architecture below describe the live project's conventions, which code here is written against — not resources this repo owns.
 
+**STRICT: never change file or system paths in source code.** Workspace paths (e.g. `/Workspace/Users/...`, `sys.path` entries), Unity Catalog table names, and file references in pipeline and notebook code are set for the Databricks workspace, which is the source of truth. They will look wrong or unresolvable from this local copy; that is expected. Do not "fix", relativize, or redirect them, even when a local run or a test fails because of them. Adapt local tooling and tests to the source layout instead.
+
+**All data in this project is synthetic.** The provider feeds and every `addressresolution` table contain generated data, not real companies or personal information.
+
 ## Databricks CLI and agent skills
 
 Work on the live project is done from local agents (Claude Code, Codex) driving the Databricks CLI, not from Genie Code in the workspace. Agents edit files on local disk; the CLI moves code to/from the workspace, runs pipelines/jobs/SQL, and inspects workspace state.
@@ -47,7 +51,7 @@ A `SessionStart` hook (`.claude/settings.json`) runs `scripts/pull_workspace.sh`
 
 ## Current state vs. planned layout
 
-This test repo is early. There is no `pyproject.toml`, `databricks.yml`, or test suite yet. What exists:
+This test repo is early. There is no `pyproject.toml` or `databricks.yml` yet. What exists:
 
 - `data/provider_a_feed.csv`, `data/provider_b_feed.csv` — raw sample feeds (~18.5k rows each).
 - `lib/clean_functions.py` — shared, provider-agnostic cleaning functions (see below).
@@ -67,6 +71,13 @@ Reusable logic goes in plain Python modules under `lib/` (not Databricks noteboo
 Code is written for Databricks (PySpark), not local execution. `cleaning/*.py` files use the Databricks notebook source format (`# Databricks notebook source` header, cells separated by `# COMMAND ----------`) and rely on notebook globals `spark` and `display`. Keep that format when editing them.
 
 Linting uses ruff (`ruff check .`, `ruff format .`). `ruff.toml` declares the notebook globals (`spark`, `display`, `dbutils`) as builtins; otherwise defaults apply.
+
+Tests in `tests/` run real local Spark plans with Databricks decorators, tables, and `ai_query` stubbed. They need PySpark 3.5 (the local JDK is 11, which PySpark 4 does not support) in the gitignored `.venv`:
+
+```bash
+uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python "pyspark==3.5.*"
+PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -v
+```
 
 ## Data architecture
 

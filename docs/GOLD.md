@@ -36,8 +36,12 @@ pipeline update. Use a separate gold pipeline reading the committed clean table.
    trusting `providers_translated` would falsely promote structural failures.
    Route eligible translation work separately and reapply **all** cleaning rules
    after repair before any future merge into the gold input. Gold v1 deliberately
-   has no dependency on translated or DLQ rows. Existing translation code was
-   left intact because its local edits predate this work.
+   has no dependency on translated or DLQ rows.
+   *Resolved since:* translation now reads `dlq_translate` (the DLQ rows with
+   non-Latin text, split from `dlq_1_0` on 2026-10-24), translates company too, and
+   reapplies the null/blank and length rules (carrying over provider_id, country,
+   and date reasons) before a row reaches `providers_translated`. Rows only the
+   source can repair go to `dlq_incomplete`; see `docs/TRANSLATION.md`.
 5. **Medium: country inference needs an uncertainty trail** (lines 111–115).
    State-only inference can be ambiguous across countries. The external lookup
    and its tie handling could not be inspected. Keep `country_inferred` and
