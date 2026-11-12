@@ -1,0 +1,16 @@
+resources:
+  pipelines:
+    address_deduplication_outputs:
+      name: Address Outputs Publication
+      catalog: addressresolution
+      schema: silver
+      serverless: true
+      continuous: false
+      channel: CURRENT
+      root_path: ../pipeline
+      libraries:
+        - glob:
+            include: ../pipeline/**
+      tags:
+        project: altana-address-resolution
+        purpose: address-deduplication

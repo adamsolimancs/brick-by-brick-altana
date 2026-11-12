@@ -1,0 +1,8 @@
+resources:
+  volumes:
+    unified_scoring_artifacts:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: ${var.unified_artifact_volume}
+      volume_type: MANAGED
+      comment: Versioned candidate ID and prediction artifacts for the unified matching experiment.

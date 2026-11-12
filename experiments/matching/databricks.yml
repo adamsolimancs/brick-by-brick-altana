@@ -1,0 +1,25 @@
+bundle:
+  name: altana_matching_experiment
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    default: addressresolution
+  schema:
+    default: matching_experiments_${workspace.current_user.short_name}
+  unified_artifact_volume:
+    default: unified_scoring_artifacts
+  matching_schema:
+    default: matching
+  silver_pipeline_id:
+    default: f6e1e8a3-2396-4c3e-bbac-ac2c4a3b2c58
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: https://dbc-031efa75-388b.cloud.databricks.com
+

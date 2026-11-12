@@ -1,0 +1,43 @@
+resources:
+  jobs:
+    silver_to_address_deduplication:
+      name: Silver → Address Deduplication
+      description: Refreshes the existing Silver pipeline and launches the complete scoring and deduplication workflow only after Silver succeeds.
+      max_concurrent_runs: 1
+      performance_target: STANDARD
+      queue:
+        enabled: true
+      tags:
+        aidevkit_project: ai-dev-kit
+        project: altana-address-resolution
+        purpose: silver-to-address-deduplication
+      tasks:
+        - task_key: preserve_translation_cache
+          notebook_task:
+            notebook_path: ../notebooks/cache_translation_responses.py
+          environment_key: cache
+        - task_key: refresh_silver
+          depends_on:
+            - task_key: preserve_translation_cache
+          pipeline_task:
+            pipeline_id: ${var.silver_pipeline_id}
+        - task_key: checkpoint_translation_cache
+          depends_on:
+            - task_key: refresh_silver
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ../notebooks/cache_translation_responses.py
+          environment_key: cache
+        - task_key: score_and_deduplicate
+          depends_on:
+            - task_key: refresh_silver
+            - task_key: checkpoint_translation_cache
+          run_if: ALL_SUCCESS
+          run_job_task:
+            job_id: ${resources.jobs.address_deduplication.id}
+            job_parameters:
+              silver_workflow_run_id: "{{job.run_id}}"
+      environments:
+        - environment_key: cache
+          spec:
+            environment_version: "5"
