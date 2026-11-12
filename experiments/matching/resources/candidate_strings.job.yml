@@ -1,0 +1,42 @@
+resources:
+  jobs:
+    candidate_string_features:
+      name: Address Candidate String Features
+      description: Adds Levenshtein and Jaro-Winkler evidence to saved candidate pairs. Reuses existing candidates without embedding or HNSW computation.
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      performance_target: STANDARD
+      tags:
+        aidevkit_project: ai-dev-kit
+        project: altana-address-resolution
+        purpose: candidate-string-features
+      parameters:
+        - name: output_catalog
+          default: ${var.catalog}
+        - name: output_schema
+          default: ${var.schema}
+        - name: library_root
+          default: ${workspace.file_path}
+        - name: experiment_id
+          default: ${resources.experiments.matching.id}
+        - name: input_embedding_run_id
+          default: latest
+        - name: string_scoring_run_id
+          default: "{{job.run_id}}"
+        - name: max_candidate_pairs
+          default: "2000000"
+      tasks:
+        - task_key: score_saved_pairs
+          disable_auto_optimization: true
+          max_retries: 0
+          notebook_task:
+            notebook_path: ../notebooks/score_candidate_strings.py
+          environment_key: string_features
+      environments:
+        - environment_key: string_features
+          spec:
+            environment_version: "5"
+            dependencies:
+              - rapidfuzz==3.14.1
+              - pandas==2.2.3
+              - mlflow==3.1.0

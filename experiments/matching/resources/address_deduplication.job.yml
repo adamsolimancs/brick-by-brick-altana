@@ -1,0 +1,127 @@
+resources:
+  jobs:
+    address_deduplication:
+      name: Address Scoring and Deduplication
+      description: Scores one fresh Silver snapshot, resolves exact and guarded fuzzy company/location duplicates, then publishes auditable Silver and canonical Gold tables.
+      max_concurrent_runs: 1
+      timeout_seconds: 14400
+      performance_target: STANDARD
+      queue:
+        enabled: true
+      tags:
+        aidevkit_project: ai-dev-kit
+        project: altana-address-resolution
+        purpose: address-deduplication
+      parameters:
+        - name: library_root
+          default: ${workspace.file_path}
+        - name: output_catalog
+          default: addressresolution
+        - name: output_schema
+          default: ${var.matching_schema}
+        - name: experiment_id
+          default: ${resources.experiments.matching.id}
+        - name: artifact_volume
+          default: unified_scoring_artifacts
+        - name: silver_workflow_run_id
+          default: manual
+        - name: max_records
+          default: "50000"
+        - name: max_candidate_pairs
+          default: "2000000"
+      tasks:
+        - task_key: block_and_score
+          max_retries: 0
+          disable_auto_optimization: true
+          notebook_task:
+            notebook_path: ../notebooks/run_matching.py
+          environment_key: matching
+        - task_key: embed_snapshot
+          depends_on:
+            - task_key: block_and_score
+          max_retries: 0
+          disable_auto_optimization: true
+          notebook_task:
+            notebook_path: ../notebooks/embed_matching.py
+            base_parameters:
+              embedding_run_id: "{{job.run_id}}_embed_{{task.execution_count}}"
+              source_run_id: "{{tasks.block_and_score.values.experiment_run_id}}"
+          environment_key: embeddings
+        - task_key: search_hnsw
+          depends_on:
+            - task_key: embed_snapshot
+          max_retries: 0
+          disable_auto_optimization: true
+          notebook_task:
+            notebook_path: ../notebooks/search_embeddings.py
+            base_parameters:
+              embedding_run_id: "{{job.run_id}}_search_{{task.execution_count}}"
+              source_embedding_run_id: "{{tasks.embed_snapshot.values.embedding_run_id}}"
+              source_run_id: "{{tasks.block_and_score.values.experiment_run_id}}"
+          environment_key: embeddings
+        - task_key: compare_strings
+          depends_on:
+            - task_key: search_hnsw
+          max_retries: 0
+          disable_auto_optimization: true
+          notebook_task:
+            notebook_path: ../notebooks/score_candidate_strings.py
+            base_parameters:
+              input_embedding_run_id: "{{tasks.search_hnsw.values.embedding_run_id}}"
+              string_scoring_run_id: "{{job.run_id}}_strings_{{task.execution_count}}"
+          environment_key: strings
+        - task_key: unified_scoring
+          depends_on:
+            - task_key: compare_strings
+          max_retries: 0
+          disable_auto_optimization: true
+          notebook_task:
+            notebook_path: ../notebooks/score_unified_candidates.py
+            base_parameters:
+              input_string_scoring_run_id: "{{tasks.compare_strings.values.string_scoring_run_id}}"
+              unified_run_id: "{{job.run_id}}_unified_{{task.execution_count}}"
+          environment_key: matching
+        - task_key: resolve_addresses
+          depends_on:
+            - task_key: unified_scoring
+          max_retries: 0
+          disable_auto_optimization: true
+          notebook_task:
+            notebook_path: ../notebooks/resolve_addresses.py
+            base_parameters:
+              unified_run_id: "{{tasks.unified_scoring.values.unified_run_id}}"
+              deduplication_run_id: "{{job.run_id}}_resolve_{{task.execution_count}}"
+          environment_key: matching
+        - task_key: publish_silver_and_gold
+          depends_on:
+            - task_key: resolve_addresses
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.address_deduplication_outputs.id}
+      environments:
+        - environment_key: matching
+          spec:
+            environment_version: "5"
+            dependencies:
+              - splink==5.0.0
+              - duckdb==1.4.1
+              - rapidfuzz==3.14.1
+              - pandas==2.2.3
+              - mlflow==3.1.0
+        - environment_key: strings
+          spec:
+            environment_version: "5"
+            dependencies:
+              - rapidfuzz==3.14.1
+              - pandas==2.2.3
+              - mlflow==3.1.0
+        - environment_key: embeddings
+          spec:
+            environment_version: "5"
+            dependencies:
+              - sentence-transformers==5.1.2
+              - transformers==4.57.1
+              - torch==2.8.0
+              - faiss-cpu==1.13.2
+              - numpy==2.2.6
+              - duckdb==1.4.1
+              - mlflow==3.1.0

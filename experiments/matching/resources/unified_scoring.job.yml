@@ -1,0 +1,48 @@
+resources:
+  jobs:
+    unified_fellegi_sunter:
+      name: Address Unified Fellegi-Sunter Scoring
+      description: Fits cleaned-field Jaro-Winkler Fellegi-Sunter and scores the exact saved blocked plus HNSW candidate union. Preserves component guards; review only.
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      performance_target: PERFORMANCE_OPTIMIZED
+      tags:
+        aidevkit_project: ai-dev-kit
+        project: altana-address-resolution
+        purpose: unified-fellegi-sunter
+      parameters:
+        - name: output_catalog
+          default: ${var.catalog}
+        - name: output_schema
+          default: ${var.schema}
+        - name: artifact_volume
+          default: ${var.unified_artifact_volume}
+        - name: library_root
+          default: ${workspace.file_path}
+        - name: experiment_id
+          default: ${resources.experiments.matching.id}
+        - name: input_string_scoring_run_id
+          default: "722397694932089"
+        - name: unified_run_id
+          default: "{{job.run_id}}"
+        - name: max_records
+          default: "100000"
+        - name: max_candidate_pairs
+          default: "2000000"
+      tasks:
+        - task_key: fit_and_score_saved_candidates
+          disable_auto_optimization: true
+          max_retries: 0
+          notebook_task:
+            notebook_path: ../notebooks/score_unified_candidates.py
+          environment_key: unified_matching
+      environments:
+        - environment_key: unified_matching
+          spec:
+            environment_version: "5"
+            dependencies:
+              - splink==5.0.0
+              - duckdb==1.4.1
+              - rapidfuzz==3.14.1
+              - pandas==2.2.3
+              - mlflow==3.1.0

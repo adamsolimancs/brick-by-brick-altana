@@ -1,0 +1,7 @@
+resources:
+  volumes:
+    matching_scoring_artifacts:
+      name: unified_scoring_artifacts
+      catalog_name: addressresolution
+      schema_name: ${var.matching_schema}
+      volume_type: MANAGED

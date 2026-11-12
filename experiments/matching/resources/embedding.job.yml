@@ -1,0 +1,62 @@
+resources:
+  jobs:
+    embedding_candidates:
+      name: Address Embedding Candidates
+      description: Multilingual embeddings and HNSW candidate expansion over a completed matching snapshot. Review only.
+      max_concurrent_runs: 1
+      timeout_seconds: 7200
+      performance_target: STANDARD
+      tags:
+        aidevkit_project: ai-dev-kit
+        project: altana-address-resolution
+        purpose: embedding-candidates
+      parameters:
+        - name: output_catalog
+          default: ${var.catalog}
+        - name: output_schema
+          default: ${var.schema}
+        - name: library_root
+          default: ${workspace.file_path}
+        - name: experiment_id
+          default: ${resources.experiments.matching.id}
+        - name: source_run_id
+          default: latest
+        - name: embedding_run_id
+          default: "{{job.run_id}}"
+        - name: max_records
+          default: "50000"
+        - name: max_candidate_pairs
+          default: "2000000"
+        - name: top_k
+          default: "20"
+        - name: search_k
+          default: "100"
+        - name: min_cosine
+          default: "0.70"
+      tasks:
+        - task_key: embed_snapshot
+          disable_auto_optimization: true
+          notebook_task:
+            notebook_path: ../notebooks/embed_matching.py
+          environment_key: embeddings
+          max_retries: 0
+        - task_key: search_hnsw
+          disable_auto_optimization: true
+          depends_on:
+            - task_key: embed_snapshot
+          notebook_task:
+            notebook_path: ../notebooks/search_embeddings.py
+          environment_key: embeddings
+          max_retries: 0
+      environments:
+        - environment_key: embeddings
+          spec:
+            environment_version: "5"
+            dependencies:
+              - sentence-transformers==5.1.2
+              - transformers==4.57.1
+              - torch==2.8.0
+              - faiss-cpu==1.13.2
+              - numpy==2.2.6
+              - duckdb==1.4.1
+              - mlflow==3.1.0

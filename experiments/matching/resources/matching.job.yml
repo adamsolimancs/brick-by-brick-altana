@@ -1,0 +1,40 @@
+resources:
+  jobs:
+    matching_experiment:
+      name: Address Matching Experiment
+      description: Bounded, unsupervised company/location linkage compared with exact matching. No production merges.
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      performance_target: PERFORMANCE_OPTIMIZED
+      tags:
+        aidevkit_project: ai-dev-kit
+        project: altana-address-resolution
+        purpose: matching-experiment
+      parameters:
+        - name: output_catalog
+          default: ${var.catalog}
+        - name: output_schema
+          default: ${var.schema}
+        - name: library_root
+          default: ${workspace.file_path}
+        - name: experiment_id
+          default: ${resources.experiments.matching.id}
+        - name: max_records
+          default: "100000"
+        - name: max_candidate_pairs
+          default: "2000000"
+      tasks:
+        - task_key: compare_matching
+          notebook_task:
+            notebook_path: ../notebooks/run_matching.py
+          environment_key: matching
+          max_retries: 0
+      environments:
+        - environment_key: matching
+          spec:
+            environment_version: "5"
+            dependencies:
+              - splink==5.0.0
+              - duckdb==1.4.1
+              - mlflow==3.1.0
+
