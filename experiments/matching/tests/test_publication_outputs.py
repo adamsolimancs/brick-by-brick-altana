@@ -47,7 +47,14 @@ def _load(name):
 
 
 def record(
-    record_id, entity, company, street, review=(), canonical=None, city="Boston"
+    record_id,
+    entity,
+    company,
+    street,
+    review=(),
+    canonical=None,
+    city="Boston",
+    decision="review_conflict",
 ):
     return (
         "run2",
@@ -69,7 +76,7 @@ def record(
         canonical or record_id,
         canonical is None,
         canonical is not None,
-        [(other, "review_conflict", 0.99, ["numeric_conflict"]) for other in review],
+        [(other, decision, 0.99, ["numeric_conflict"]) for other in review],
     )
 
 
@@ -102,6 +109,22 @@ class PublicationOutputTests(unittest.TestCase):
             record("c1", "C", "Zeta", "5 Elm St", review=["d1"]),
             record("d1", "D", "Yotta", "5 Elm St", review=["c1"]),
             record("e1", "E", "Solo", "1 Lone Ln"),
+            # Same company at two clearly different addresses, settled by the
+            # resolver: both are published.
+            *[
+                record(
+                    key,
+                    key,
+                    "Twin",
+                    street,
+                    review=[other],
+                    decision="same_company_different_address",
+                )
+                for key, other, street in (
+                    ("f1", "g1", "Cui Street Building o"),
+                    ("g1", "f1", "Gu Street Building t"),
+                )
+            ],
         ]
         runs = cls.spark.createDataFrame(
             [
@@ -147,8 +170,8 @@ class PublicationOutputTests(unittest.TestCase):
         self.assertEqual(conflict["other_street_address"], "99 Other Rd")
         self.assertEqual(conflict["differing_fields"], ["street_address"])
 
-    def test_shared_building_review_is_not_a_hold(self):
-        for key in ("c1", "d1", "e1"):
+    def test_shared_building_and_settled_different_address_are_not_holds(self):
+        for key in ("c1", "d1", "e1", "f1", "g1"):
             self.assertIsNone(self.silver[key]["gold_hold_reason"])
             self.assertEqual(self.silver[key]["same_company_conflicts"], [])
 
@@ -188,7 +211,8 @@ class PublicationOutputTests(unittest.TestCase):
 
     def test_gold_publishes_only_canonical_records_not_on_hold(self):
         self.assertEqual(
-            sorted(row["provider_id"] for row in self.gold), ["c1", "d1", "e1"]
+            sorted(row["provider_id"] for row in self.gold),
+            ["c1", "d1", "e1", "f1", "g1"],
         )
 
 

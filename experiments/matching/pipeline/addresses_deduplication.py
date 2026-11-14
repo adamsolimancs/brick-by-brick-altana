@@ -4,6 +4,9 @@ from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
 HOLD_REASON = "same_company_address_conflict"
+# Review decision the resolver writes on a same-company pair it settled as two
+# clearly different addresses (lib/resolution.py). Such a pair holds nothing.
+DIFFERENT_ADDRESS = "same_company_different_address"
 # Address parts compared between two same-company records, as (label, key).
 ADDRESS_PARTS = (
     ("street_address", "street_key"),
@@ -18,7 +21,10 @@ def same_company_conflicts(records):
     The matcher refused to merge these pairs because the addresses disagree or
     could not be verified. With the same company on both sides, that is either
     one company at two addresses or two companies sharing a name, and nothing
-    in the data says which. One row per (record, conflicting record).
+    in the data says which. Pairs the resolver already settled are not here:
+    the same place was merged into one entity, and two clearly different
+    addresses carry the DIFFERENT_ADDRESS decision. One row per (record,
+    conflicting record).
     """
     other = records.select(
         F.col("record_id").alias("other_id"),
@@ -54,6 +60,7 @@ def same_company_conflicts(records):
             (F.col("name_key") != "")
             & (F.col("name_key") == F.col("other_name_key"))
             & (F.col("entity_id") != F.col("other_entity_id"))
+            & (F.col("review.decision") != DIFFERENT_ADDRESS)
         )
         .select(
             "record_id",

@@ -9,6 +9,8 @@ from lib.matching import prepare_record  # noqa: E402
 from lib.resolution import (  # noqa: E402
     FILL_STEP,
     attach_incomplete,
+    fill_judgment_candidates,
+    pair_key,
     resolve_records,
 )
 
@@ -98,6 +100,51 @@ class IncompleteFillTests(unittest.TestCase):
         )
         self.assertEqual(filled, [])
 
+    def test_misspelled_or_relabelled_street_still_supplies_the_city(self):
+        for street in (
+            "12 Main St Sute 5",
+            "12 Main Street, Ste. 5",
+            "12 Main St # 5",
+            "12Main St Suite 5",
+        ):
+            _, filled, _ = self.attach(
+                [source("1")], [incomplete("9", "city", street_address=street)]
+            )
+            self.assertEqual([row["city"] for row in filled], ["Boston"], street)
+
+    def test_a_replaced_letter_or_other_number_does_not_supply_the_city(self):
+        for street in ("12 Mann St Suite 5", "121 Main St Suite 5", "12 Main St"):
+            _, filled, _ = self.attach(
+                [source("1")], [incomplete("9", "city", street_address=street)]
+            )
+            self.assertEqual(filled, [], street)
+
+    def test_spelling_that_fits_two_locations_leaves_the_city_parked(self):
+        _, filled, _ = self.attach(
+            [
+                source("1"),
+                source("2", street_address="12 Main Street Suite 5", city="Salem"),
+            ],
+            [incomplete("9", "city", street_address="12 Main St Sute 5")],
+        )
+        self.assertEqual(filled, [])
+
+    def test_blank_street_is_filled_across_spellings_of_the_city(self):
+        _, filled, _ = self.attach(
+            [source("1", city="South Thomas")],
+            [incomplete("9", "street_address", city="Süd Thomas")],
+        )
+        self.assertEqual(
+            [row["street_address"] for row in filled], ["12 Main St Suite 5"]
+        )
+        # The source row keeps its own city spelling.
+        self.assertEqual(filled[0]["city"], "Süd Thomas")
+        _, filled, _ = self.attach(
+            [source("1", city="South Thomas")],
+            [incomplete("9", "street_address", city="Salem")],
+        )
+        self.assertEqual(filled, [])
+
     def test_unknown_company_and_region_conflict_stay_parked(self):
         _, filled, _ = self.attach(
             [source("1")],
@@ -149,6 +196,58 @@ class IncompleteFillTests(unittest.TestCase):
         self.assertEqual(sum(row["is_canonical"] for row in updated), 1)
         # The input mapping is not mutated.
         self.assertEqual(canonical["cluster_record_count"], 2)
+
+
+class JudgedFillTests(unittest.TestCase):
+    """A blank-city row whose street only a judge can tie to a known record."""
+
+    def setUp(self):
+        self.mapping, self.records = resolved(
+            source("1", street_address="57 Mus'af Creek")
+        )
+        self.row = incomplete("9", "city", street_address="57 Musaeef Creek")
+        self.key = pair_key(
+            self.records[0]["unique_id"], prepare_record(self.row)["unique_id"]
+        )
+
+    def fill(self, **judgment):
+        judgment = dict(dict(model="m", reason="romanization"), **judgment)
+        return attach_incomplete(
+            self.mapping, self.records, [self.row], {self.key: judgment}
+        )[1]
+
+    def test_row_is_a_judge_candidate_and_stays_parked_without_an_answer(self):
+        pairs = fill_judgment_candidates(self.records, [self.row])
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][1]["unique_id"], self.records[0]["unique_id"])
+        self.assertEqual(
+            attach_incomplete(self.mapping, self.records, [self.row])[1], []
+        )
+
+    def test_confident_same_answer_fills_the_city(self):
+        filled = self.fill(same_address=True, confidence=0.95)
+        self.assertEqual([row["city"] for row in filled], ["Boston"])
+        updated, _ = attach_incomplete(
+            self.mapping,
+            self.records,
+            [self.row],
+            {self.key: dict(same_address=True, confidence=0.95, model="m", reason="r")},
+        )
+        added = next(row for row in updated if row["filled_field"] == "city")
+        self.assertIn("address judge", added["deduplication_reasons"][0])
+        self.assertTrue(added["is_duplicate"])
+
+    def test_low_confidence_or_different_answer_stays_parked(self):
+        self.assertEqual(self.fill(same_address=True, confidence=0.89), [])
+        self.assertEqual(self.fill(same_address=False, confidence=0.99), [])
+
+    def test_a_different_number_is_never_a_candidate(self):
+        row = incomplete("9", "city", street_address="58 Musaeef Creek")
+        self.assertEqual(fill_judgment_candidates(self.records, [row]), [])
+
+    def test_a_rule_filled_row_is_not_sent_to_the_judge(self):
+        row = incomplete("9", "city", street_address="57 Musaf Creek")
+        self.assertEqual(fill_judgment_candidates(self.records, [row]), [])
 
 
 if __name__ == "__main__":

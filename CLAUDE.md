@@ -90,6 +90,17 @@ Medallion pipeline in Unity Catalog, catalog `addressresolution`, schemas `bronz
 
 Entity matching and address legitimacy are separate decisions: companies can legitimately share an address (office buildings), and one company may have multiple valid addresses.
 
+## Merge rule: do not guess
+
+**STRICT: never merge two addresses on a guess.** A merge needs evidence that the two records are the same place. When the data does not say, keep the records apart, hold them in Silver, and flag them for review. Being conservative is preferred over a cleaner Gold table.
+
+- Lowering a DLQ or review count is never a reason to merge. Do not force rows into Gold.
+- A vote, a likelihood, or "this looks like a typo" is not evidence when it has to pick which of two values is true. Example: `27 Hançer Mission` against `277 Hançer Mission` stays held even when both providers report `277`; it may be a second office. Such pairs get a flag (`possible_number_slip`), not a merge.
+- A different house, unit or building number, building letter, or region is never bridged by a spelling rule or a model.
+- If a proposed rule infers something the data does not state, say so plainly and offer the flag-only version first. Let the user choose before anything merges.
+
+There is no reference address table: the data is synthetic, so the only evidence is the feeds themselves.
+
 ## Provider feed differences
 
 The feeds disagree in schema and conventions, which is the core of the silver-layer work:

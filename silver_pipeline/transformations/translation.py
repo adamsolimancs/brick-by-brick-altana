@@ -16,6 +16,11 @@ validation stages:
   3. Escalation: requests whose Gemma response fails the checks are sent once
      more, with the same prompt, to system.ai.qwen35-122b-a10b. Its response is
      used only if it passes the same checks.
+  4. Glossary normalization: stored responses are deterministically normalized
+     before the checks — common legal-entity suffixes, recurring company-type
+     nouns and surnames, and separator hyphens after address labels — so
+     glossary-fixable responses are accepted without new AI requests. Raw
+     responses and original fields are retained unchanged.
 
 Outputs in addressresolution.silver:
   providers_translation_prepared — deterministic lookup and original fields
@@ -42,8 +47,10 @@ output branches read the stored shared stage rather than repeating inference.
 Identical requests share a response, but provider rows (including duplicates)
 remain intact. AI_RESPONSE_FIELD retains the live workspace's "result" contract.
 
-Raw responses are materialized, not an append-only inference cache. Full refresh
-can repeat AI calls. To revalidate stored responses, selectively refresh only
+Raw responses reuse a durable request cache maintained by the parent workflow
+before and after Silver refreshes, including failed refreshes. Endpoint errors
+and empty responses are retried; successful responses are revalidated against
+the current rules. To revalidate stored responses, selectively refresh only
 providers_translation_results and its output branches. See docs/TRANSLATION.md.
 No manual tiny-batch loop or actions/writes run inside dataset definitions.
 
@@ -76,6 +83,14 @@ from pyspark.sql.window import Window
 # now SQL INSERT/UPDATE/MERGE against the Delta tables, not code changes.
 PLACE_LOOKUP_TABLE = "addressresolution.default.translation_place_lookup"
 COUNTRY_GROUPS_TABLE = "addressresolution.default.translation_country_groups"
+RESPONSE_CACHE_TABLE = "addressresolution.default.translation_response_cache"
+# Reviewer corrections for translations the checks rejected. One row per
+# source record and field: provider, provider_id, field_name, input_text (the
+# text the correction was written for), corrected_text, review_status,
+# reviewer, reviewed_at, note. Only 'approved' rows are applied, and only while
+# the record's text still equals input_text. Edits are SQL against the table.
+CORRECTIONS_TABLE = "addressresolution.default.translation_review_corrections"
+CORRECTION_STATUS = "reviewed_correction"
 # Each row's group from COUNTRY_GROUPS_TABLE, kept for diagnostics.
 COUNTRY_GROUP_COL = "translation_country_group"
 
@@ -109,7 +124,7 @@ ALL_TRANSLATION_FIELDS = ("company",) + ADDRESS_FIELDS
 CLEANING_LENGTH_BOUNDS = {
     "company": (2, 100),
     "street_address": (4, 200),
-    "city": (2, 50),
+    "city": (2, 60),
     "state": (2, 50),
 }
 # Country text interpolated into prompts: letters, spaces, and the punctuation
@@ -196,6 +211,74 @@ ADDRESS_LEAKAGE_PATTERN = (
     r"(?i)\b(?:street|avenue|road|boulevard|lane|drive|way|plaza|square|"
     r"highway|building|block|unit|suite|apartment|floor)\b"
 )
+
+# ---------------------------------------------------------------------------
+# Deterministic response glossary (validation-time normalization)
+# ---------------------------------------------------------------------------
+#
+# Replacements applied to STORED AI responses before the validation checks,
+# reusing responses already materialized in providers_translation_raw and
+# providers_translation_escalation_raw. Entries are script-specific (CJK,
+# Hangul, Cyrillic), so they can only fire on text the non-Latin response
+# check would otherwise flag; Latin responses are untouched except by the
+# label hyphen rule. Multi-character compounds precede shorter entries they
+# overlap. Original fields and raw responses are retained unchanged; only
+# the validated candidate (and the accepted value) is normalized.
+#
+# Legal-entity suffixes plus recurring company-type nouns and surnames seen
+# in the provider feeds. Entries must not translate the meaning of proper
+# names; surname entries only romanize recurring name characters (岡田 ->
+# Okada), mirroring how the street prompts romanize the same names. Verify
+# new entries against providers_translation_review before adding them.
+RESPONSE_GLOSSARY = [
+    # Legal-entity suffixes (Japan, China, Korea)
+    ("株式会社", " Co., Ltd. "),  # kabushiki kaisha
+    ("合同会社", " LLC "),  # godo kaisha
+    ("有限会社", " Y.K. "),  # yugen kaisha
+    ("有限公司", " Co., Ltd. "),  # youxian gongsi
+    # Company-type nouns
+    ("食品", " Foods "),
+    ("電気", " Electric "),
+    ("通信", " Telecom "),
+    ("建設", " Construction "),
+    ("情報", " Information "),
+    ("運輸", " Transport "),
+    ("水産", " Fisheries "),
+    ("ガス", " Gas "),
+    ("반도체", " Semiconductor "),
+    # Recurring surnames
+    ("岡田", " Okada "),
+    ("中村", " Nakamura "),
+]
+# A separator hyphen directly after an address-label identifier is not part
+# of the identifier (Guangzhou Street Building Y- Apt 150): give it a space
+# so label-identifier extraction sees the identifier. The lookahead keeps
+# real compound identifiers such as Suite B-02 intact.
+RESPONSE_GLOSSARY.append(
+    (
+        r"(?i)((?:building|bldg|block|blk|unit|suite|ste|apartment|apt|floor|fl)"
+        r"\.?[\s\p{Z}]+[a-z0-9]+)-(?![a-z0-9])",
+        "$1 -",
+    )
+)
+# Replacements pad with spaces to keep tokens apart; collapse afterwards.
+RESPONSE_WHITESPACE_COLLAPSE_PATTERN = r"[\s\p{Z}]{2,}"
+
+
+def _glossary_normalize(response: Column) -> Column:
+    """Trim an AI response, apply the deterministic glossary, re-trim.
+
+    Called only at row-level validation (_apply_ai_response).
+    _request_response_issues, which feeds the escalation materialized views,
+    deliberately does NOT glossary-normalize, so the glossary never changes
+    those views' definitions: a pipeline update refreshes only the results
+    and output branches and issues no new AI requests.
+    """
+    candidate = F.regexp_replace(response, RESPONSE_WHITESPACE_PATTERN, "")
+    for pattern, replacement in RESPONSE_GLOSSARY:
+        candidate = F.regexp_replace(candidate, pattern, replacement)
+    candidate = F.regexp_replace(candidate, RESPONSE_WHITESPACE_COLLAPSE_PATTERN, " ")
+    return F.regexp_replace(candidate, RESPONSE_WHITESPACE_PATTERN, "")
 
 
 # ---------------------------------------------------------------------------
@@ -428,14 +511,63 @@ def _ai_response_issues(
     return F.filter(issues, lambda issue: issue.isNotNull())
 
 
+def _review_corrections(corrections: DataFrame, field: str) -> DataFrame:
+    """One approved correction per source record and text for this field.
+
+    Blank or non-Latin corrections are ignored, and a key with two different
+    corrections is dropped, so the join can never add rows or pick one
+    arbitrarily.
+    """
+    corrected = F.trim(F.col("corrected_text"))
+    return (
+        corrections.where(
+            (F.col("field_name") == field) & (F.col("review_status") == "approved")
+        )
+        .where(
+            corrected.isNotNull() & (corrected != "") & F.col("input_text").isNotNull()
+        )
+        .where(~corrected.rlike(NON_LATIN_PATTERN))
+        .groupBy(
+            F.col("provider").alias("__correction_provider"),
+            F.col("provider_id").cast("string").alias("__correction_provider_id"),
+            F.col("input_text").alias("__correction_input"),
+        )
+        .agg(
+            F.min(corrected).alias(f"__{field}_correction"),
+            F.countDistinct(corrected).alias("_correction_count"),
+        )
+        .where(F.col("_correction_count") == 1)
+        .drop("_correction_count")
+    )
+
+
+def _with_review_correction(
+    df: DataFrame, corrections: DataFrame, field: str
+) -> DataFrame:
+    """Attach this field's approved correction, matched on record and text."""
+    return df.join(
+        F.broadcast(_review_corrections(corrections, field)),
+        (F.col("provider") == F.col("__correction_provider"))
+        & (F.col("provider_id").cast("string") == F.col("__correction_provider_id"))
+        & (F.col(field) == F.col("__correction_input")),
+        "left",
+    ).drop("__correction_provider", "__correction_provider_id", "__correction_input")
+
+
 def _apply_ai_response(
     df: DataFrame,
     col_name: str,
     response_col: str,
     *,
     result_field: str = AI_RESPONSE_FIELD,
+    correction_col: str | None = None,
 ) -> DataFrame:
-    """Keep diagnostics and accept only AI responses passing the basic checks."""
+    """Keep diagnostics and accept only AI responses passing the basic checks.
+
+    A reviewer correction (correction_col) replaces the model response: it has
+    no issues to report and its status is CORRECTION_STATUS. The model response
+    and error stay in the diagnostic columns.
+    """
     # Keep field access in the lazy plan. Spark validates this contract during
     # normal pipeline analysis; inspecting df.schema here would force analysis.
     original = F.col(col_name)
@@ -449,16 +581,29 @@ def _apply_ai_response(
             error_col: F.col(response_col).getField("errorMessage"),
         }
     )
-    candidate = F.regexp_replace(F.col(raw_col), RESPONSE_WHITESPACE_PATTERN, "")
+    # Deterministic glossary fixes reuse stored responses: applied only here,
+    # at row-level validation. _request_response_issues (escalation selection)
+    # deliberately normalizes nothing, so the escalation materialized views
+    # keep their definitions and a pipeline update runs no new AI requests.
+    candidate = _glossary_normalize(F.col(raw_col))
     df = df.withColumn(
         issues_col,
         _ai_response_issues(
             original, candidate, F.col(error_col), attempted, field_name=col_name
         ),
     )
+    corrected = F.col(correction_col).isNotNull() if correction_col else F.lit(False)
+    if correction_col:
+        df = df.withColumn(
+            issues_col,
+            F.when(corrected, F.array().cast("array<string>")).otherwise(
+                F.col(issues_col)
+            ),
+        )
     passed = F.size(F.col(issues_col)) == 0
     status = (
-        F.when(attempted & F.col(error_col).isNotNull(), F.lit("ai_error"))
+        F.when(corrected, F.lit(CORRECTION_STATUS))
+        .when(attempted & F.col(error_col).isNotNull(), F.lit("ai_error"))
         .when(attempted & ~passed, F.lit("invalid_response"))
         .when(attempted, F.lit("ai_translated"))
         .when(
@@ -467,12 +612,11 @@ def _apply_ai_response(
         )
         .otherwise(F.lit("unchanged"))
     )
-    return df.withColumns(
-        {
-            f"{col_name}_translation_status": status,
-            col_name: F.when(attempted & passed, candidate).otherwise(original),
-        }
-    ).drop(response_col)
+    value = F.when(attempted & passed, candidate).otherwise(original)
+    if correction_col:
+        value = F.when(corrected, F.col(correction_col)).otherwise(value)
+    df = df.withColumns({f"{col_name}_translation_status": status, col_name: value})
+    return df.drop(*filter(None, (response_col, correction_col)))
 
 
 # Each prompt carries only the rules for its field and country group: rules
@@ -816,6 +960,54 @@ def _infer_requests(requests: DataFrame) -> DataFrame:
     )
 
 
+def _cached_inference(requests: DataFrame, infer) -> DataFrame:
+    """Read-through reuse; only the workflow checkpoint task writes the cache.
+
+    The model endpoint can change in place: bump prompt_version (or the prompt)
+    to explicitly invalidate responses when adopting new endpoint behavior.
+    Keep this identity identical to cache_translation_responses.cache_key.
+    """
+    requests = requests.drop("source_field_count")
+    identity = (
+        "request_key",
+        "model",
+        "model_parameters",
+        "prompt_version",
+        "field_name",
+        "input_text",
+        "country_context",
+        "request_prompt",
+    )
+    keyed = requests.withColumn(
+        "cache_key", F.sha2(F.to_json(F.struct(*identity)), 256)
+    )
+    # Aggregate identical rows, but fail conflicting cache entries instead of
+    # choosing an arbitrary response or multiplying provider observations.
+    cached = (
+        spark.read.table(RESPONSE_CACHE_TABLE)
+        .where(
+            F.col("ai_result.errorMessage").isNull()
+            & (F.length(F.trim(F.col(f"ai_result.{AI_RESPONSE_FIELD}"))) > 0)
+        )
+        .groupBy("cache_key")
+        .agg(F.collect_set(F.to_json("ai_result")).alias("_responses"))
+        .select(
+            "cache_key",
+            F.from_json(
+                F.when(
+                    F.size("_responses") == 1, F.element_at("_responses", 1)
+                ).otherwise(F.raise_error("Conflicting translation cache responses")),
+                f"{AI_RESPONSE_FIELD} string,errorMessage string",
+            ).alias("ai_result"),
+        )
+    )
+    hits = keyed.join(cached, "cache_key", "inner").drop("cache_key")
+    misses = keyed.join(cached.select("cache_key"), "cache_key", "left_anti").drop(
+        "cache_key"
+    )
+    return hits.unionByName(infer(misses))
+
+
 def _request_response_issues(ai_result: Column) -> Column:
     """The row-level response checks, evaluated once per distinct request.
 
@@ -916,9 +1108,16 @@ def _select_responses(raw: DataFrame, escalation_raw: DataFrame | None) -> DataF
 
 
 def _validate_translation(
-    prepared: DataFrame, raw: DataFrame, escalation_raw: DataFrame | None = None
+    prepared: DataFrame,
+    raw: DataFrame,
+    escalation_raw: DataFrame | None = None,
+    corrections: DataFrame | None = None,
 ) -> DataFrame:
-    """Reattach stored responses without deduplicating or dropping source rows."""
+    """Reattach stored responses without deduplicating or dropping source rows.
+
+    `corrections` (CORRECTIONS_TABLE) supplies reviewer-approved text for
+    fields whose model response was rejected; see _apply_ai_response.
+    """
     responses = _select_responses(raw, escalation_raw)
     df = prepared
     for field in ALL_TRANSLATION_FIELDS:
@@ -931,8 +1130,16 @@ def _validate_translation(
             F.col("ai_model").alias(model),
         )
         df = df.join(field_responses, key, "left").drop(key)
+        correction = None
+        if corrections is not None:
+            correction = f"__{field}_correction"
+            df = _with_review_correction(df, corrections, field)
         df = _apply_ai_response(
-            df, field, response, result_field=AI_RESPONSE_FIELD
+            df,
+            field,
+            response,
+            result_field=AI_RESPONSE_FIELD,
+            correction_col=correction,
         ).withColumnRenamed(model, f"{field}_ai_model")
     df = df.withColumn("remaining_dlq_reasons", _remaining_dlq_reasons())
     df = _add_translation_review_flags(df)
@@ -982,7 +1189,7 @@ def _add_translation_review_flags(df: DataFrame) -> DataFrame:
             *[
                 F.when(
                     F.col(f"{field}_translation_status").isin(
-                        "ai_translated", "lookup"
+                        "ai_translated", "lookup", CORRECTION_STATUS
                     ),
                     F.lit(field),
                 )
@@ -1051,11 +1258,12 @@ def providers_translation_requests() -> DataFrame:
 
 @dp.materialized_view(
     name="addressresolution.silver.providers_translation_raw",
-    comment="Stored AI responses before validation. Full refresh can repeat inference.",
+    comment="Raw responses reused from the durable request cache; inference only for cache misses.",
 )
 def providers_translation_raw() -> DataFrame:
-    return _infer_requests(
-        spark.read.table("addressresolution.silver.providers_translation_requests")
+    return _cached_inference(
+        spark.read.table("addressresolution.silver.providers_translation_requests"),
+        _infer_requests,
     )
 
 
@@ -1075,15 +1283,15 @@ def providers_translation_escalation_requests() -> DataFrame:
 @dp.materialized_view(
     name="addressresolution.silver.providers_translation_escalation_raw",
     comment=(
-        "Stored escalation responses before validation. Full refresh can repeat "
-        "inference."
+        "Stored escalation responses before validation; reuse keyed by escalation model and prompt."
     ),
 )
 def providers_translation_escalation_raw() -> DataFrame:
-    return _infer_escalation_requests(
+    return _cached_inference(
         spark.read.table(
             "addressresolution.silver.providers_translation_escalation_requests"
-        )
+        ),
+        _infer_escalation_requests,
     )
 
 
@@ -1115,6 +1323,7 @@ def providers_translation_results() -> DataFrame:
         spark.read.table(
             "addressresolution.silver.providers_translation_escalation_raw"
         ),
+        spark.read.table(CORRECTIONS_TABLE),
     )
 
 

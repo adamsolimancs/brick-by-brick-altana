@@ -195,10 +195,16 @@ class InsertTests(unittest.TestCase):
         self.assertTrue(
             statements[0].startswith("INSERT INTO cat.sch.tbl (a, b, c, d) VALUES")
         )
-        self.assertIn("'it''s'", statements[0])
+        self.assertIn("'it\\'s'", statements[0])
         self.assertIn("NULL", statements[0])
         self.assertIn("true", statements[0])
         self.assertIn("'third'", statements[1])
+
+    def test_insert_statements_escape_backslashes(self):
+        # Backslash escapes the next character in Databricks SQL, so an
+        # unescaped backslash before a quote would close the literal early.
+        statements = insert_statements("cat.sch.tbl", [{"a": "x\\' OR 1=1 --"}])
+        self.assertIn("('x\\\\\\' OR 1=1 --')", statements[0])
 
 
 if __name__ == "__main__":

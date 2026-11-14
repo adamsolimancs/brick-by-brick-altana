@@ -45,8 +45,12 @@ from lib.resolution import (  # noqa: E402
     SELECTION_RULE,
     VERSION,
     attach_incomplete,
+    fill_judgment_candidates,
+    judgment_candidates,
     resolve_records,
+    settle_same_company,
 )
+from lib import address_judge  # noqa: E402
 from lib.matching import FIELDS, digest  # noqa: E402
 from lib.unified_matching import ADDRESS_NON_MATCH  # noqa: E402
 from lib.cluster_completion import (  # noqa: E402
@@ -231,9 +235,6 @@ relevant_pairs = pairs.where(
     )
 )
 mapping = resolve_records(records, [row.asDict() for row in relevant_pairs.collect()])
-# Fold incomplete Silver rows into the one resolved entity that can complete
-# them. They join as duplicates, so the Gold record never changes; rows without
-# a unique fit stay parked in dlq_incomplete.
 incomplete_columns = [
     "provider",
     "provider_id",
@@ -252,7 +253,64 @@ incomplete = [
 by_incomplete_identity = {
     (row["provider"], row["provider_id"]): row for row in incomplete
 }
-mapping, filled = attach_incomplete(mapping, records, incomplete)
+# Same-company review pairs with matching numbers whose words no text rule
+# reconciles (romanization, translation) go to the address judge model. Answers
+# are kept by request, so a rerun reuses them and only new requests are sent.
+# A failed or empty answer is not stored: the pair stays on hold and is asked
+# again on the next run.
+# A blank-city row whose street no rule finds is judged the same way against
+# the company's records with the same numbers, on the street alone.
+judge_requests = address_judge.requests(
+    judgment_candidates(mapping, records)
+) + address_judge.requests(
+    fill_judgment_candidates(records, incomplete), street_only=True
+)
+judgments = {}
+if judge_requests:
+    judgment_table = f"{prefix}.same_company_address_judgments"
+    asked = spark.createDataFrame(
+        judge_requests, "id_l string, id_r string, request_key string, prompt string"
+    )
+    unique_requests = asked.select("request_key", "prompt").distinct()
+    if spark.catalog.tableExists(judgment_table):
+        unique_requests = unique_requests.join(
+            spark.read.table(judgment_table).select("request_key"),
+            "request_key",
+            "left_anti",
+        )
+    (
+        unique_requests.withColumn(
+            "ai_result", F.expr(address_judge.ai_query_sql("prompt"))
+        )
+        .select(
+            "request_key",
+            "prompt",
+            F.lit(address_judge.MODEL).alias("model"),
+            F.lit(address_judge.PROMPT_VERSION).alias("prompt_version"),
+            F.col("ai_result.result").alias("response"),
+            F.current_timestamp().alias("judged_at"),
+            F.lit(run_id).alias("first_deduplication_run_id"),
+        )
+        .where(F.length(F.trim("response")) > 0)
+        .write.format("delta")
+        .mode("append")
+        .saveAsTable(judgment_table)
+    )
+    answers = spark.read.table(judgment_table).select("request_key", "response")
+    if answers.groupBy("request_key").count().where("count > 1").limit(1).count():
+        raise AssertionError("Conflicting address judgments for one request")
+    judgments = address_judge.judgments(
+        row.asDict() for row in asked.join(answers, "request_key", "inner").collect()
+    )
+# Settle the same-company review pairs: the same place written twice is merged
+# (by text rule, or by a judgment at 0.90 or above), two clearly different
+# addresses are released to Gold as separate records. Everything else, and
+# every pair with a different number, stays on hold.
+mapping = settle_same_company(mapping, records, judgments)
+# Fold incomplete Silver rows into the one resolved entity that can complete
+# them. They join as duplicates, so the Gold record never changes; rows without
+# a unique fit stay parked in dlq_incomplete.
+mapping, filled = attach_incomplete(mapping, records, incomplete, judgments)
 filled_rows = []
 for completed in filled:
     source = by_incomplete_identity[completed["provider"], completed["provider_id"]]

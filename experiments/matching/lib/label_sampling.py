@@ -19,7 +19,13 @@ GROUP_WEIGHTS = {
 
 
 def sql_string(value):
-    return "'" + str(value).replace("'", "''") + "'"
+    """A Databricks SQL string literal.
+
+    Backslash is the escape character there, so backslashes are doubled and
+    quotes are written as ``\\'``. A doubled quote (``''``) is not an escape on
+    the warehouse: it ends one literal and starts another, dropping the quote.
+    """
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def allocation(populations, total, weights=None, minimums=None):

@@ -18,7 +18,7 @@ following holds for the cleaned values:
   - null or blank company, street_address, city, state, or country
   - non-Latin text in company, street_address, city, or state
   - abnormally short or long company, street_address, city, or state
-    (bounds: company 2-100, street_address 4-200, city 2-50, state 2-50;
+    (bounds: company 2-100, street_address 4-200, city 2-60, state 2-50;
     city matches the existing city_length_flag thresholds)
   - null, duplicate, or unparseable provider IDs within each provider
     (all rows of a duplicate (provider, provider_id) group go to the DLQ)
@@ -161,14 +161,14 @@ def clean_provider_feed(
     )
 
     # Step 3d: Flag abnormally short/long city and country values.
-    # Short cities (< 2 chars) are likely data errors; long cities (> 50 chars)
+    # Short cities (< 2 chars) are likely data errors; long cities (> 60 chars)
     # catch AI hallucinations, misplaced addresses, or country names in the
     # city field. Country should be ISO alpha-2 (exactly 2 chars); anything
     # shorter or longer indicates an unmapped or corrupt value.
     df = df.withColumn(
         "city_length_flag",
         when(length(col("city")) < 2, lit("too_short"))
-        .when(length(col("city")) > 50, lit("too_long"))
+        .when(length(col("city")) > 60, lit("too_long"))
         .otherwise(lit(None)),
     )
     df = df.withColumn(
@@ -285,7 +285,7 @@ def provider_b_clean():
 DLQ_REQUIRED_FIELDS = ("company", "street_address", "city", "state", "country")
 DLQ_NON_LATIN_FIELDS = ("company", "street_address", "city", "state")
 DLQ_MIN_LENGTHS = {"company": 2, "street_address": 4, "city": 2, "state": 2}
-DLQ_MAX_LENGTHS = {"company": 100, "street_address": 200, "city": 50, "state": 50}
+DLQ_MAX_LENGTHS = {"company": 100, "street_address": 200, "city": 60, "state": 50}
 # Same script classification as translation.py: Latin script plus Common and
 # Inherited (digits, punctuation, whitespace, combining accents) are clean;
 # any other character marks the value as non-Latin.

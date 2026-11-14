@@ -14,3 +14,4 @@ A Tech@NYU, Databricks, and Altana project for building a scalable address-resol
 - `lib/` — shared Python modules imported by notebooks. `lib/clean_functions.py` holds provider-agnostic cleaning functions; add anything reusable across feeds there rather than inside a provider notebook.
 - `cleaning/` — Databricks notebooks, one per provider (bronze → silver). Import shared code with `from lib.clean_functions import ...`.
 - `docs/` — the use-case PDF (source of truth) and `SETUP.md` (our design proposal).
+- `experiments/matching/` — isolated Databricks matching job, multi-pass blocking and probabilistic scoring, tests, and [first live comparison results](experiments/matching/RESULTS.md).

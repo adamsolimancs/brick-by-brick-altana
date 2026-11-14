@@ -54,13 +54,34 @@ normalized because punctuation and number spelling matter. Changing the model,
 prompt text, or prompt version changes the keys. A missing response fails
 validation and retains the original field, rather than silently dropping a row.
 
-Raw results are a **materialized snapshot, not an append-only inference cache**.
-A refresh of the raw stage may recompute inference, and interrupted inference does
-not guarantee committed partial progress. Spark/service retries can repeat calls;
-this is not an exactly-once billing guarantee. Errors are retained for review and
-are not automatically retried selectively. A separate persistent cache/worker is
-needed for durable per-request retries across full refreshes; it cannot safely be
-implemented by reading and writing the same dataset inside a pipeline definition.
+Raw stages now read through the durable Delta table
+`addressresolution.default.translation_response_cache`. The parent Silver job
+checkpoints existing committed raw responses before refreshing Silver and again
+after Silver finishes (including failure). These separate tasks create the cache
+if necessary and insert successful, nonblank responses without overwriting prior
+entries. Endpoint errors and blank results are not reused. Content-validation
+failures may be cached: raw responses are revalidated under current glossary and
+validation rules, and the escalation model has a separate cache identity.
+
+The cache key includes the request key, model, model parameters, prompt version,
+field, input text, country context, and actual prompt. A model/prompt change causes
+a miss; a validation/glossary change reuses the response. Bump the prompt version
+when intentionally adopting an in-place endpoint model update. The embedding job
+already independently caches vectors by pinned model revision and text hash.
+
+Before first use of the updated Silver code, run the parent workflow's
+`preserve_translation_cache` notebook task (or the standalone
+`experiments/matching/notebooks/cache_translation_responses.py`) to create and
+seed the cache. Deploy the updated parent job and Silver source together. The
+matching bundle references the existing Silver pipeline; it does not itself
+upload `silver_pipeline/transformations/translation.py`. Subsequent parent job
+runs maintain the cache automatically. Direct selective/full Silver refreshes
+can read the cache but require that separate checkpoint task to save new entries.
+
+Interrupted inference does not guarantee committed partial progress, and
+Spark/service retries can still repeat calls. This is not an exactly-once billing
+guarantee. Dataset definitions perform only reads and transformations; all cache
+writes happen in the workflow tasks outside the declarative pipeline.
 
 No manual small-batch loop or forced repartitioning is introduced. Databricks
 [recommends letting AI Functions manage parallelization and scaling](https://docs.databricks.com/aws/en/large-language-models/ai-functions#use-ai-functions-in-production-workflows).
@@ -120,7 +141,7 @@ For each of street_address, city, and state, it retains:
 | _original | Cleaned, merged input before deterministic lookup or AI translation. |
 | _ai_response | Raw model text, including invalid output; null when AI was skipped or returned no text. |
 | _ai_error | Nullable endpoint error message. Null means no endpoint error was reported, including when AI was skipped. |
-| _translation_status | unchanged, lookup, ai_translated, ai_error, or invalid_response. |
+| _translation_status | unchanged, lookup, ai_translated, reviewed_correction, ai_error, or invalid_response. |
 | _translation_issues | Array of failure reasons; empty for fields without an issue. |
 | _ai_model | Model whose response is shown; null when no response was stored. |
 
@@ -252,12 +273,31 @@ auditing and retries.
 providers_translation_review is a current snapshot, not an append-only queue
 history. A later successful translation removes the row from that snapshot.
 
-Keep human review decisions and corrections in a separate persistent Delta table
-keyed by stable provider/source record identifiers. Writing corrections directly
-to a pipeline-managed materialized view would allow a refresh to overwrite them.
-Include reviewer, review status, correction, and the relevant input/model/prompt
-version when implementing that workflow. Distinguish retryable endpoint failures
-from translations requiring human judgment.
+Reviewer corrections live in a separate persistent Delta table,
+`addressresolution.default.translation_review_corrections`
+(`CORRECTIONS_TABLE`), not in a pipeline-managed materialized view that a
+refresh would overwrite. One row per source record and field:
+
+| Column | Meaning |
+| --- | --- |
+| provider, provider_id | The source record. |
+| field_name | company, street_address, city or state. |
+| input_text | The field text the correction was written for. |
+| corrected_text | The reviewed English text. |
+| review_status | Only `approved` rows are applied. |
+| reviewer, reviewed_at, note | Who decided, when, and on what basis. |
+
+providers_translation_results applies a correction when the record and field
+match and the field text still equals input_text, so a correction never
+outlives a change in the source. The corrected text replaces the model
+response, the field has no translation issues, and its _translation_status is
+`reviewed_correction`; the rejected model answer stays in _ai_response. A
+correction that is blank or still contains non-Latin text is ignored, and two
+different approved corrections for one key cancel each other. Add or change a
+correction with SQL against the table; the next pipeline update applies it.
+
+A correction is for a translation that needs human judgment. A retryable
+endpoint failure (ai_error, empty_response) should be retried, not corrected.
 
 Databricks documents this as the
 [quarantine pattern](https://docs.databricks.com/aws/en/ldp/expectation-patterns#quarantine-invalid-data).

@@ -103,6 +103,12 @@ LOOKUP_SCHEMA = (
     "map_type STRING, country_group STRING, source_text STRING, english_text STRING"
 )
 COUNTRY_GROUPS_SCHEMA = "country_group STRING, country_value STRING"
+# Schema of addressresolution.default.translation_review_corrections.
+CORRECTIONS_SCHEMA = (
+    "provider STRING, provider_id STRING, field_name STRING, input_text STRING, "
+    "corrected_text STRING, review_status STRING, reviewer STRING, "
+    "reviewed_at TIMESTAMP, note STRING"
+)
 # Rows copied from the live addressresolution.default lookup tables.
 PLACE_LOOKUP = [
     ("city", "chinese", "北京", "Beijing"),
@@ -147,6 +153,82 @@ class TranslationTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.spark.stop()
 
+    def test_durable_cache_reuses_success_and_retries_errors(self):
+        import ast
+
+        # Execute the checkpoint's exact key function without any Delta writes.
+        notebook = (
+            Path(__file__).resolve().parents[1]
+            / "experiments/matching/notebooks/cache_translation_responses.py"
+        )
+        tree = ast.parse(notebook.read_text())
+        key_function = next(
+            n
+            for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name == "cache_key"
+        )
+        namespace = {"F": F}
+        exec(
+            compile(
+                ast.Module(body=[key_function], type_ignores=[]), str(notebook), "exec"
+            ),
+            namespace,
+        )
+        fields = "request_key string,model string,model_parameters string,prompt_version string,field_name string,input_text string,country_context string,request_prompt string"
+        requests = self.spark.createDataFrame(
+            [
+                ("one", "gemma", "params", "v1", "company", "日本", "JP", "prompt"),
+                ("two", "gemma", "params", "v1", "company", "中国", "CN", "prompt2"),
+            ],
+            fields,
+        )
+        cached = requests.select(
+            namespace["cache_key"]().alias("cache_key"),
+            F.struct(
+                F.when(F.col("request_key") == "one", "Japan Ltd").alias("result"),
+                F.when(F.col("request_key") == "two", "endpoint error").alias(
+                    "errorMessage"
+                ),
+            ).alias("ai_result"),
+        )
+        calls = []
+
+        def infer(missing):
+            calls.append([r.request_key for r in missing.collect()])
+            return missing.withColumn(
+                "ai_result",
+                F.struct(
+                    F.lit("Fresh response").alias("result"),
+                    F.lit(None).cast("string").alias("errorMessage"),
+                ),
+            )
+
+        with self.tables({translation.RESPONSE_CACHE_TABLE: cached}):
+            rows = translation._cached_inference(requests, infer).collect()
+            self.assertEqual(calls, [["two"]])
+            self.assertEqual(
+                {r.request_key: r.ai_result.result for r in rows},
+                {"one": "Japan Ltd", "two": "Fresh response"},
+            )
+            # Primary/escalation model, parameters, prompt and version are all key material.
+            for column in (
+                "model",
+                "model_parameters",
+                "prompt_version",
+                "request_prompt",
+            ):
+                translation._cached_inference(
+                    requests.withColumn(column, F.lit("changed")), infer
+                ).collect()
+                self.assertEqual(set(calls[-1]), {"one", "two"})
+            # Repeated raw observations must not multiply provider rows.
+            with self.tables(
+                {translation.RESPONSE_CACHE_TABLE: cached.unionByName(cached)}
+            ):
+                self.assertEqual(
+                    translation._cached_inference(requests, infer).count(), 2
+                )
+
     def dlq_frame(self, rows, extra_schema=""):
         """dlq_translate-shaped rows; missing columns take DLQ_DEFAULTS or NULL."""
         return self.spark.createDataFrame(
@@ -157,12 +239,19 @@ class TranslationTests(unittest.TestCase):
     def tables(self, tables=None, place_lookup=None, country_groups=None):
         """Serve named tables to spark.read.table; yield the mutable mapping."""
         frames = {
+            translation.RESPONSE_CACHE_TABLE: self.spark.createDataFrame(
+                [],
+                "cache_key string, ai_result struct<result:string,errorMessage:string>",
+            ),
             translation.PLACE_LOOKUP_TABLE: self.spark.createDataFrame(
                 PLACE_LOOKUP if place_lookup is None else place_lookup, LOOKUP_SCHEMA
             ),
             translation.COUNTRY_GROUPS_TABLE: self.spark.createDataFrame(
                 COUNTRY_GROUPS if country_groups is None else country_groups,
                 COUNTRY_GROUPS_SCHEMA,
+            ),
+            translation.CORRECTIONS_TABLE: self.spark.createDataFrame(
+                [], CORRECTIONS_SCHEMA
             ),
             **(tables or {}),
         }
@@ -1364,6 +1453,109 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(accepted, [1])
         self.assertEqual(review, [6])
         self.assertEqual(sorted(incomplete), [2, 3, 4, 5])
+
+    def test_reviewer_correction_replaces_a_rejected_translation(self):
+        russian = "ул. 9 мая, д. 26 стр.5/6"
+        source = self.dlq_frame(
+            [
+                {"provider_id": 1, "street_address": russian, "country": "RU"},
+                # Same text from another record: the correction is per record.
+                {"provider_id": 2, "street_address": russian, "country": "RU"},
+                # The source text changed after the review: not applied.
+                {
+                    "provider_id": 3,
+                    "street_address": "ул. 9 мая, д. 27",
+                    "country": "RU",
+                },
+                {"provider_id": 4, "street_address": russian, "country": "RU"},
+                {"provider_id": 5, "street_address": russian, "country": "RU"},
+                {"provider_id": 6, "street_address": russian, "country": "RU"},
+            ]
+        )
+
+        def correction(provider_id, text, status="approved", input_text=russian):
+            return (
+                "A",
+                str(provider_id),
+                "street_address",
+                input_text,
+                text,
+                status,
+                "reviewer",
+                None,
+                None,
+            )
+
+        corrections = self.spark.createDataFrame(
+            [
+                correction(1, " 9 Maya Street 26, Building 5/6 "),
+                correction(3, "9 Maya Street 26, Building 5/6"),
+                correction(4, "9 Maya Street 26, Building 5/6", status="proposed"),
+                # Two different approved corrections: neither is applied.
+                correction(5, "9 Maya Street 26, Building 5/6"),
+                correction(5, "9 May Street 26, Building 5/6"),
+                # A correction must itself be Latin text.
+                correction(6, "ул. 9 Maya 26"),
+                # A correction written for other city text is not applied.
+                (
+                    "A",
+                    "1",
+                    "city",
+                    "Springfeld",
+                    "Shelbyville",
+                    "approved",
+                    "r",
+                    None,
+                    None,
+                ),
+            ],
+            CORRECTIONS_SCHEMA,
+        )
+        with self.tables():
+            prepared = translation._prepare_translation(source)
+            requests = translation._translation_requests(prepared)
+            # The model moved a label, which the checks reject.
+            raw = requests.withColumn(
+                "ai_result",
+                F.struct(
+                    F.lit("9 Maya Street, Apt 26, Building 5/6").alias(
+                        translation.AI_RESPONSE_FIELD
+                    ),
+                    F.lit(None).cast("string").alias("errorMessage"),
+                ),
+            )
+            rows = {
+                r.provider_id: r
+                for r in translation._validate_translation(
+                    prepared, raw, corrections=corrections
+                ).collect()
+            }
+            without = translation._validate_translation(prepared, raw).collect()
+        self.assertEqual(len(rows), 6)
+        fixed = rows[1]
+        self.assertEqual(fixed.street_address, "9 Maya Street 26, Building 5/6")
+        self.assertEqual(
+            fixed.street_address_translation_status, translation.CORRECTION_STATUS
+        )
+        self.assertEqual(fixed.street_address_translation_issues, [])
+        self.assertFalse(fixed.translation_needs_review)
+        self.assertEqual(fixed.translation_route, "accepted")
+        self.assertEqual(fixed.city, "Springfield")
+        # The rejected model answer stays visible next to the correction.
+        self.assertEqual(
+            fixed.street_address_ai_response, "9 Maya Street, Apt 26, Building 5/6"
+        )
+        self.assertEqual(fixed.street_address_original, russian)
+        for provider_id in (2, 3, 4, 5, 6):
+            with self.subTest(provider_id=provider_id):
+                row = rows[provider_id]
+                self.assertTrue(row.translation_needs_review)
+                self.assertEqual(row.translation_route, "review")
+                self.assertEqual(
+                    row.street_address_translation_status, "invalid_response"
+                )
+        self.assertTrue(all(r.translation_needs_review for r in without))
+        self.assertFalse(any(name.startswith("__") for name in fixed.asDict()))
 
     def test_pipeline_preserves_rows_and_builds_review_flags(self):
         cases = {
